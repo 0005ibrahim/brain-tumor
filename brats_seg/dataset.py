@@ -39,6 +39,13 @@ def split_patients(patients, val_frac=0.15, seed=42):
     train_ids = list(order[n_val:])
     return train_ids, val_ids
 
+def worker_init_fn(worker_id):
+    from torch.utils.data import get_worker_info
+
+    info = get_worker_info()
+    if info is not None:
+        info.dataset.reseed(info.dataset.epoch, worker_id)
+
 def remap_labels(seg):
     out = np.zeros_like(seg, dtype=np.uint8)
     for raw, train in RAW_TO_TRAIN.items():
@@ -93,7 +100,17 @@ class BraTSDataset(_TorchDataset):
         self.training = training
         self.augmentor = augmentor
         self.fg_prob = fg_prob
-        self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        self.epoch = 0
+        self.reseed(0)
+
+    def reseed(self, epoch, worker_id=0):
+        self.epoch = epoch
+        self.rng = np.random.default_rng(
+            np.random.SeedSequence([self.seed, epoch, worker_id, int(self.training)])
+        )
+        if self.augmentor is not None:
+            self.augmentor.rng = self.rng
 
     def __len__(self):
         return len(self.patient_ids)

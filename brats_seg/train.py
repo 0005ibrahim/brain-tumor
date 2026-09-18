@@ -1,18 +1,20 @@
 import argparse
 import math
 import os
+import time
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from .augmentation import Augmentor, BATCH_MIXERS
-from .dataset import BraTSDataset, NUM_CLASSES, list_patients, split_patients
+from .dataset import (BraTSDataset, NUM_CLASSES, list_patients, split_patients,
+                      worker_init_fn)
 from .losses import build_loss
 from .metrics import REGIONS, aggregate_cases, evaluate_case
 from .model import build_model
 from .dataset import unmap_labels
-from .utils import load_config, save_checkpoint, set_seed, _to_plain
+from .utils import load_checkpoint, load_config, save_checkpoint, set_seed, _to_plain
 
 def build_augmentor(cfg, seed):
     a = cfg.get("augmentation", {})
@@ -56,7 +58,7 @@ def validate(model, loader, loss_fn, device):
     mean_dice = float(np.mean([np.mean(dice_accum[r]) for r in REGIONS]))
     return total_loss / max(1, n), mean_dice
 
-def train(cfg_path):
+def train(cfg_path, resume=False, max_hours=None):
     cfg = load_config(cfg_path)
     seed = cfg.get("seed", 42)
     set_seed(seed)
@@ -85,11 +87,14 @@ def train(cfg_path):
     train_ds = BraTSDataset(root, train_ids, norm, patch, training=True,
                             augmentor=aug, seed=seed)
     val_ds = BraTSDataset(root, val_ids, norm, patch, training=False, seed=seed)
+    num_workers = cfg.train.get("num_workers", 2)
     train_loader = DataLoader(train_ds, batch_size=cfg.train.get("batch_size", 1),
-                              shuffle=True, num_workers=cfg.train.get("num_workers", 2),
-                              pin_memory=(device.type == "cuda"), drop_last=False)
+                              shuffle=True, num_workers=num_workers,
+                              pin_memory=(device.type == "cuda"), drop_last=False,
+                              worker_init_fn=worker_init_fn)
     val_loader = DataLoader(val_ds, batch_size=cfg.train.get("batch_size", 1),
-                            shuffle=False, num_workers=cfg.train.get("num_workers", 2))
+                            shuffle=False, num_workers=num_workers,
+                            worker_init_fn=worker_init_fn)
 
     model = build_model(cfg).to(device)
     loss_fn = build_loss(cfg).to(device)
@@ -108,8 +113,43 @@ def train(cfg_path):
     )
 
     best_dice, patience, bad_epochs = -1.0, cfg.train.get("early_stop_patience", 20), 0
+    start_epoch = 0
+    last_path = os.path.join(ckpt_dir, "last.pt")
 
-    for epoch in range(epochs):
+    if resume and os.path.exists(last_path):
+        ck = load_checkpoint(last_path, map_location="cpu")
+        if "optimizer" not in ck:
+            raise SystemExit(
+                f"{last_path} predates resume support (no optimizer state). "
+                "Delete it and restart, or finish the run in one session."
+            )
+        model.load_state_dict(ck["model"])
+        optimizer.load_state_dict(ck["optimizer"])
+        scaler.load_state_dict(ck["scaler"])
+        scheduler.load_state_dict(ck["scheduler"])
+        mix_rng.bit_generator.state = ck["mix_rng"]
+        torch.set_rng_state(ck["torch_rng"])
+        np.random.set_state(ck["numpy_rng"])
+        if ck.get("cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(ck["cuda_rng"])
+        best_dice = ck["best_dice"]
+        bad_epochs = ck["bad_epochs"]
+        start_epoch = ck["epoch"]
+        if start_epoch >= epochs:
+            print(f"[{exp}] already complete ({start_epoch}/{epochs} epochs). Nothing to do.")
+            return best_dice
+        print(f"  resumed from {last_path}: {start_epoch}/{epochs} epochs done, "
+              f"best val_dice={best_dice:.4f}")
+    elif resume:
+        print(f"  --resume given but {last_path} not found; starting from scratch")
+
+    t0 = time.time()
+
+    for epoch in range(start_epoch, epochs):
+        train_ds.epoch = epoch
+        if num_workers == 0:
+            train_ds.reseed(epoch)
+            val_ds.reseed(0)
         model.train()
         optimizer.zero_grad()
         running = 0.0
@@ -134,19 +174,46 @@ def train(cfg_path):
               f"val_loss={val_loss:.4f} val_dice={val_dice:.4f} "
               f"lr={scheduler.get_last_lr()[0]:.2e}")
 
-        state = {"model": model.state_dict(), "epoch": epoch,
-                 "val_dice": val_dice, "config": _to_plain(cfg)}
-        save_checkpoint(state, os.path.join(ckpt_dir, "last.pt"))
-        if val_dice > best_dice:
+        is_best = val_dice > best_dice
+        if is_best:
             best_dice = val_dice
             bad_epochs = 0
-            save_checkpoint(state, os.path.join(ckpt_dir, "best.pt"))
-            print(f"    -> new best val_dice={best_dice:.4f} (saved best.pt)")
         else:
             bad_epochs += 1
-            if bad_epochs >= patience:
-                print(f"  early stopping at epoch {epoch+1} (no gain in {patience})")
-                break
+
+        state = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch + 1,
+            "val_dice": val_dice,
+            "best_dice": best_dice,
+            "bad_epochs": bad_epochs,
+            "mix_rng": mix_rng.bit_generator.state,
+            "torch_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy_rng": np.random.get_state(),
+            "config": _to_plain(cfg),
+        }
+        save_checkpoint(state, last_path)
+        if is_best:
+            save_checkpoint(
+                {k: state[k] for k in ("model", "epoch", "val_dice", "config")},
+                os.path.join(ckpt_dir, "best.pt"),
+            )
+            print(f"    -> new best val_dice={best_dice:.4f} (saved best.pt)")
+
+        if bad_epochs >= patience:
+            print(f"  early stopping at epoch {epoch+1} (no gain in {patience})")
+            break
+
+        done = epoch + 1 - start_epoch
+        elapsed = time.time() - t0
+        if max_hours and elapsed + elapsed / done > max_hours * 3600:
+            print(f"  time budget {max_hours}h reached after epoch {epoch+1}/{epochs} "
+                  f"({elapsed/3600:.2f}h this session) — rerun with --resume to continue")
+            break
 
     print(f"[{exp}] done. best val_dice={best_dice:.4f}")
     return best_dice
@@ -154,8 +221,12 @@ def train(cfg_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from last.pt in the experiment's checkpoint dir")
+    ap.add_argument("--max-hours", type=float, default=None,
+                    help="stop cleanly before this many hours elapse this session")
     args = ap.parse_args()
-    train(args.config)
+    train(args.config, resume=args.resume, max_hours=args.max_hours)
 
 if __name__ == "__main__":
     main()
