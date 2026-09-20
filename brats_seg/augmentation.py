@@ -225,8 +225,68 @@ def tumor_aware_cutmix_batch(
 
     return out_img.astype(np.float32), out_lbl.astype(np.float32)
 
+def _feather_window(n, frac):
+    if n <= 0:
+        return np.ones(0, dtype=np.float32)
+    ramp = max(1, int(round(n * frac)))
+    idx = np.arange(n, dtype=np.float32)
+    edge = np.minimum(idx + 0.5, n - idx - 0.5)
+    w = np.clip(edge / ramp, 0.0, 1.0)
+    return (0.5 - 0.5 * np.cos(np.pi * w)).astype(np.float32)
+
+def tumor_aware_soft_cutmix_batch(
+    images, labels, num_classes, rng=None, box_scale=0.4, feather=0.25,
+    background_label=0
+):
+    rng = rng or np.random.default_rng()
+    n = images.shape[0]
+    perm = rng.permutation(n)
+    H, W, D = images.shape[2:]
+    bh, bw, bd = int(H * box_scale), int(W * box_scale), int(D * box_scale)
+
+    soft = np.stack([_to_soft(labels[i], num_classes) for i in range(n)])
+    out_img = images.copy()
+    out_lbl = soft.copy()
+
+    for i in range(n):
+        donor = perm[i]
+        if donor == i:
+            continue
+        donor_lbl = labels[donor]
+        if np.asarray(donor_lbl).ndim == 4:
+            donor_hard = np.argmax(donor_lbl, axis=0)
+        else:
+            donor_hard = np.asarray(donor_lbl)
+
+        tumor_vox = np.argwhere(donor_hard != background_label)
+        if tumor_vox.shape[0] > 0:
+            cy, cx, cz = tumor_vox.mean(axis=0).astype(int)
+        else:
+            cy = int(rng.integers(0, H))
+            cx = int(rng.integers(0, W))
+            cz = int(rng.integers(0, D))
+
+        y1, y2 = np.clip([cy - bh // 2, cy + bh // 2], 0, H)
+        x1, x2 = np.clip([cx - bw // 2, cx + bw // 2], 0, W)
+        z1, z2 = np.clip([cz - bd // 2, cz + bd // 2], 0, D)
+
+        m = (_feather_window(y2 - y1, feather)[:, None, None]
+             * _feather_window(x2 - x1, feather)[None, :, None]
+             * _feather_window(z2 - z1, feather)[None, None, :])
+
+        src_img = images[donor, :, y1:y2, x1:x2, z1:z2]
+        dst_img = out_img[i, :, y1:y2, x1:x2, z1:z2]
+        out_img[i, :, y1:y2, x1:x2, z1:z2] = (1.0 - m) * dst_img + m * src_img
+
+        src_lbl = soft[donor, :, y1:y2, x1:x2, z1:z2]
+        dst_lbl = out_lbl[i, :, y1:y2, x1:x2, z1:z2]
+        out_lbl[i, :, y1:y2, x1:x2, z1:z2] = (1.0 - m) * dst_lbl + m * src_lbl
+
+    return out_img.astype(np.float32), out_lbl.astype(np.float32)
+
 BATCH_MIXERS = {
     "mixup": mixup_batch,
     "cutmix": cutmix_batch,
     "tumor_aware_cutmix": tumor_aware_cutmix_batch,
+    "tumor_aware_soft_cutmix": tumor_aware_soft_cutmix_batch,
 }
