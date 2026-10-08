@@ -5,6 +5,7 @@ Final-year project: multimodal brain tumor segmentation on **BraTS2020** with a
 augmentation contribution.
 
 **Novel contributions**
+
 1. **Normalization ablation** — 4 intensity-normalization strategies compared
    head-to-head (`zscore_brain`, `percentile_clip`, `white_stripe`,
    `hybrid_percentile_zscore`).
@@ -57,13 +58,13 @@ training on Kaggle.
 
 ## Recommended workflow (laptop + Kaggle + GitHub)
 
-| Tool | Role |
-|------|------|
-| **Laptop** | Write/debug. Smoke-test on 2-4 patients (`data.max_patients`). |
+| Tool       | Role                                                              |
+| ---------- | ----------------------------------------------------------------- |
+| **Laptop** | Write/debug. Smoke-test on 2-4 patients (`data.max_patients`).    |
 | **Kaggle** | Real training + the full ablation. Free T4/P100, ~30 GPU-hr/week. |
-| **GitHub** | Single source of truth. Push from laptop, `git clone` on Kaggle. |
+| **GitHub** | Single source of truth. Push from laptop, `git clone` on Kaggle.  |
 
-On Kaggle: attach *"BraTS2020 Dataset (Training + Validation)"* (by awsaf49),
+On Kaggle: attach _"BraTS2020 Dataset (Training + Validation)"_ (by awsaf49),
 set Accelerator = GPU, Internet = ON, then in the first cell `git clone` this
 repo, `pip install -r requirements.txt`, and point `data.root_dir` at the mounted
 dataset path (verify with `ls`).
@@ -101,13 +102,13 @@ evidence behind every number in the paper.
 
 ## Configuration for a 4GB GPU (GTX 1650)
 
-| Setting | Default (4GB) | Bigger GPU |
-|---|---|---|
-| `patch_size` | `[96,96,96]` | `[128,128,128]` |
-| `base_channels` | `8` | `16-32` |
-| `depth` | `3` | `4` |
-| `batch_size` | `1` | `2-4` |
-| `accumulate_grad_batches` | `8` | `4` |
+| Setting                   | Default (4GB) | Bigger GPU      |
+| ------------------------- | ------------- | --------------- |
+| `patch_size`              | `[96,96,96]`  | `[128,128,128]` |
+| `base_channels`           | `8`           | `16-32`         |
+| `depth`                   | `3`           | `4`             |
+| `batch_size`              | `1`           | `2-4`           |
+| `accumulate_grad_batches` | `8`           | `4`             |
 
 If you still hit CUDA OOM, drop `patch_size` to `[64,64,64]`. Record which
 settings each experiment used — it affects the ablation comparison.
@@ -124,3 +125,7 @@ settings each experiment used — it affects the ablation comparison.
 
 The dataset is **not** committed (multi-GB, registration-restricted). Use the
 Kaggle mirror; don't re-upload it. See `LICENSE` before publishing.
+
+## Project Status
+
+This repository contains the implementation and documentation for the Brain Tumor Segmentation project.
