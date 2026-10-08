@@ -128,4 +128,4 @@ Kaggle mirror; don't re-upload it. See `LICENSE` before publishing.
 
 ## Project Status
 
-This repository contains the implementation and documentation for the Brain Tumor Segmentation project.
+This repository contains the implementations and documentation for the Brain Tumor Segmentation project.
